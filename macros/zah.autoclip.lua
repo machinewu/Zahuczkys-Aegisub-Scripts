@@ -62,6 +62,8 @@ local ok, err = outcome.ok, outcome.err
 
 local default_config = {
     ["python"] = "python3",
+    ["python_virtual_env_activate"] = "",
+    ["enable_python_virtual_env_activate"] = false,
     ["vsrepo_mode"] = "vsrepo in PATH (`$ vsrepo --help`)",
     ["vsrepo"] = "vsrepo",
     ["disable_layer_mismatch"] = false,
@@ -85,6 +87,16 @@ local validation_func = function(config)
         config["python"] = default_config["python"]
     elseif type(config["python"]) ~= "string" then
         return err("Invalid key \"python\".")
+    end
+    if config["python_virtual_env_activate"] == nil then
+        config["python_virtual_env_activate"] = default_config["python_virtual_env_activate"]
+    elseif type(config["python_virtual_env_activate"]) ~= "string" then
+        return err("Invalid key \"python_virtual_env_activate\".")
+    end
+    if config["enable_python_virtual_env_activate"] == nil then
+        config["enable_python_virtual_env_activate"] = default_config["enable_python_virtual_env_activate"]
+    elseif type(config["enable_python_virtual_env_activate"]) ~= "boolean" then
+        return err("Invalid key \"enable_python_virtual_env_activate\".")
     end
     if config["vsrepo_mode"] == nil then
         config["vsrepo_mode"] = default_config["vsrepo_mode"]
@@ -118,28 +130,54 @@ local re_newline = re.compile([[\s*(?:\n\s*)+]])
 
 local run_cmd = require("petzku.util").io.run_cmd
 
-local c = function(command)
+local exe_fmt = function(config_key)
+    if config_key == "python" then
+        return "'" .. config["python"] .. "'"
+    elseif config_key == "python_virtual_env_activate" then
+        if config["enable_python_virtual_env_activate"] then
+            return "'" .. config["python_virtual_env_activate"] .. "'"
+        else
+            return ""
+        end
+    elseif config_key == "vsrepo" then
+        if config["vsrepo_mode"] == "vsrepo in PATH (`$ vsrepo --help`)" then
+            return "'" .. config["vsrepo"] .. "'"
+        else
+            return "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "'"
+        end
+    end
+    return ""
+end
+
+local c = function(command_input)
+    local command = ""
     if jit.os == "Windows" then
-        local i = 1
-        for chunks in re_newline:gsplit(command, true) do
-            if i == 1 then
+        if config["enable_python_virtual_env_activate"] then
+            -- Not sure if anyone's PC lacks permissions to run the python virtualenv powershell script
+            -- command = "$LASTEXITCODE=0; Set-ExecutionPolicy -Scope Process -ExecutionPolicy Unrestricted -Force; & " .. exe_fmt("python_virtual_env_activate")
+            command = "$LASTEXITCODE=0; & " .. exe_fmt("python_virtual_env_activate")
+        end
+
+        for chunks in re_newline:gsplit(command_input, true) do
+            if command == "" then
                 command = "& " .. chunks
             else
                 command = command .. " ; if ($LASTEXITCODE -eq 0) {& " .. chunks .. "}"
             end
-            i = i + 1
         end
         command = command .. " ; exit $LASTEXITCODE"
         return "powershell -Command \"" .. command .. "\""
     else
-        local i = 1
-        for chunks in re_newline:gsplit(command, true) do
-            if i == 1 then
+        if config["enable_python_virtual_env_activate"] then
+            command = exe_fmt("python_virtual_env_activate")
+        end
+
+        for chunks in re_newline:gsplit(command_input, true) do
+            if command == "" then
                 command = chunks
             else
                 command = command .. " && " .. chunks
             end
-            i = i + 1
         end
         return command
 end end
@@ -164,12 +202,16 @@ first_time_python_vsrepo = function()
         { class = "label",                          x = 0, y = 1, width = 25,
                                                     label = "Enter name to Python if it is in PATH or path to Python executable:" },
         { class = "edit", name = "python",          x = 0, y = 2, width = 25,
-                                                    text = config["python"] },
+                                                    text = config["enable_python_virtual_env_activate"] and config["python_virtual_env_activate"] or config["python"] },
         { class = "label",                          x = 0, y = 3, width = 25,
+                                                    label = "Is the path entered above for the virtual environment activate(or activate.ps1) script?" },
+        { class = "checkbox", name = "enable_python_virtual_env_activate", x = 0, y = 4, width = 25,
+                                                    label = "Enable", value = config["enable_python_virtual_env_activate"] },
+        { class = "label",                          x = 0, y = 5, width = 25,
                                                     label = "Select whether vsrepo is in PATH and enter either the name to vsrepo or path to vsrepo.py:" },
-        { class = "dropdown", name = "vsrepo_mode", x = 0, y = 4, width = 25,
+        { class = "dropdown", name = "vsrepo_mode", x = 0, y = 6, width = 25,
                                                     items = { "vsrepo in PATH (`$ vsrepo --help`)", "Path to vsrepo.py (`$ python vsrepo.py --help`)" }, value = config["vsrepo_mode"] },
-        { class = "edit", name = "vsrepo",          x = 0, y = 5, width = 25,
+        { class = "edit", name = "vsrepo",          x = 0, y = 7, width = 25,
                                                     text = config["vsrepo"] }
     }
     local buttons = { "&Set", "Cancel" }
@@ -183,6 +225,12 @@ first_time_python_vsrepo = function()
         for k, v in pairs(result_table) do
             config[k] = v
         end
+
+        if config["enable_python_virtual_env_activate"] then
+            config["python_virtual_env_activate"] = config["python"]
+            config["python"] = "python"
+        end
+
         aconfig.write_config("zah.autoclip", config)
             :ifErr(function()
                 aegisub.debug.out("[aka.config] Failed to write config to file.\n")
@@ -197,7 +245,7 @@ first_time_python = function()
     local button_ids
     local button
     local result_table
-    if os.execute(c("'" .. config["python"] .. "' --version")) then
+    if os.execute(c(exe_fmt("python") .. " --version")) then
         return ok("Already satisfied")
     else
         repeat
@@ -207,7 +255,11 @@ first_time_python = function()
                 { class = "label",                          x = 0, y = 1, width = 25,
                                                             label = "Enter name to Python if it is in PATH or path to Python executable:" },
                 { class = "edit", name = "python",          x = 0, y = 2, width = 25,
-                                                            text = config["python"] }
+                                                            text = config["enable_python_virtual_env_activate"] and config["python_virtual_env_activate"] or config["python"] },
+                { class = "label",                          x = 0, y = 3, width = 25,
+                                                            label = "Is the path entered above for the virtual environment activate(or activate.ps1) script?" },
+                { class = "checkbox", name = "enable_python_virtual_env_activate", x = 0, y = 4, width = 25,
+                                                            label = "Enable", value = config["enable_python_virtual_env_activate"] },
             }
             buttons = { "&Continue", "Cancel" }
             button_ids = { ok = "&Continue", yes = "&Continue", save = "&Continue", apply = "&Continue", close = "Cancel", no = "Cancel", cancel = "Cancel" }
@@ -217,9 +269,15 @@ first_time_python = function()
             if button == false or button == "Cancel" then
                 return err("[zah.autoclip] Operation cancelled by user")
             elseif button == "&Continue" then
-                config["python"] = result_table["python"]
+                config["enable_python_virtual_env_activate"] = result_table["enable_python_virtual_env_activate"]
+                if config["enable_python_virtual_env_activate"] then
+                    config["python_virtual_env_activate"] = result_table["python"]
+                    config["python"] = "python"
+                else
+                    config["python"] = result_table["python"]
+                end
             end
-        until os.execute(c("'" .. config["python"] .. "' --version"))
+        until os.execute(c(exe_fmt("python") .. " --version"))
 
         aconfig.write_config("zah.autoclip", config)
             :ifErr(function()
@@ -235,9 +293,7 @@ first_time_vsrepo = function()
     local button_ids
     local button
     local result_table
-    if os.execute(c(config["vsrepo_mode"] == "vsrepo in PATH (`$ vsrepo --help`)"
-                and "'" .. config["vsrepo"] .. "' --help"
-                 or "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' --help")) then
+    if os.execute(c(exe_fmt("vsrepo") .. " --help")) then
         return ok("Already satisfied")
     else
         repeat
@@ -263,9 +319,7 @@ first_time_vsrepo = function()
                 config["vsrepo_mode"] = result_table["vsrepo_mode"]
                 config["vsrepo"] = result_table["vsrepo"]
             end
-        until os.execute(c(config["vsrepo_mode"] == "vsrepo in PATH (`$ vsrepo --help`)"
-                       and "'" .. config["vsrepo"] .. "' --help"
-                        or "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' --help"))
+        until os.execute(c(exe_fmt("vsrepo") .. " --help"))
 
         aconfig.write_config("zah.autoclip", config)
             :ifErr(function()
@@ -280,20 +334,24 @@ edit_config = function()
         { class = "label",                          x = 0, y = 0, width = 25,
                                                     label = "Enter name to Python if it is in PATH or path to Python executable:" },
         { class = "edit", name = "python",          x = 0, y = 1, width = 25,
-                                                    text = config["python"] },
+                                                    text = config["enable_python_virtual_env_activate"] and config["python_virtual_env_activate"] or config["python"] },
         { class = "label",                          x = 0, y = 2, width = 25,
+                                                    label = "Is the path entered above for the virtual environment activate(or activate.ps1) script?" },
+        { class = "checkbox", name = "enable_python_virtual_env_activate", x = 0, y = 3, width = 25,
+                                                    label = "Enable", value = config["enable_python_virtual_env_activate"] },
+        { class = "label",                          x = 0, y = 4, width = 25,
                                                     label = "Select whether vsrepo is in PATH and enter either the name to vsrepo or path to vsrepo.py:" },
-        { class = "dropdown", name = "vsrepo_mode", x = 0, y = 3, width = 25,
+        { class = "dropdown", name = "vsrepo_mode", x = 0, y = 5, width = 25,
                                                     items = { "vsrepo in PATH (`$ vsrepo --help`)", "Path to vsrepo.py (`$ python vsrepo.py --help`)" }, value = config["vsrepo_mode"] },
-        { class = "edit", name = "vsrepo",          x = 0, y = 4, width = 25,
+        { class = "edit", name = "vsrepo",          x = 0, y = 6, width = 25,
                                                     text = config["vsrepo"] },
-        { class = "label",                          x = 0, y = 5, width = 25,
-                                                    label = "Do you want to disable warning when the number of layers mismatches?" },
-        { class = "checkbox", name = "disable_layer_mismatch", x = 0, y = 6, width = 25,
-                                                    label = "Disable", value = config["disable_layer_mismatch"] },
         { class = "label",                          x = 0, y = 7, width = 25,
+                                                    label = "Do you want to disable warning when the number of layers mismatches?" },
+        { class = "checkbox", name = "disable_layer_mismatch", x = 0, y = 8, width = 25,
+                                                    label = "Disable", value = config["disable_layer_mismatch"] },
+        { class = "label",                          x = 0, y = 9, width = 25,
                                                     label = "Do you want to disable warning when Python script is outdated?" },
-        { class = "checkbox", name = "disable_version_notify", x = 0, y = 8, width = 25,
+        { class = "checkbox", name = "disable_version_notify", x = 0, y = 10, width = 25,
                                                     label = "Disable", value = config["disable_version_notify"] }
     }
     local buttons = { "&Apply", "Close" }
@@ -309,6 +367,11 @@ edit_config = function()
         end
 
         config = result_table
+        if config["enable_python_virtual_env_activate"] then
+            config["python_virtual_env_activate"] = config["python"]
+            config["python"] = "python"
+        end
+
         aconfig.write_config("zah.autoclip", config)
             :ifErr(function()
                 aegisub.debug.out("[aka.config] Failed to write config to file.\n")
@@ -331,7 +394,7 @@ run_command_until = function(command)
     local result_table
 
     while true do
-        run = command .. "\n'" .. config["python"] .. "' -m ass_autoclip --check-dependencies"
+        run = command .. "\n" .. exe_fmt("python") .. " -m ass_autoclip --check-dependencies"
         log, status, terminate, code = run_cmd(c(run), true)
         if status then
             return ok()
@@ -360,21 +423,18 @@ run_command_until = function(command)
 end end end
 
 fisrt_time_dependencies = function()
-    if not os.execute(c("'" .. config["python"] .. "' -m ass_autoclip --check-dependencies")) then
+    if not os.execute(c(exe_fmt("python") .. " -m ass_autoclip --check-dependencies")) then
         local dialog = {
             { class = "label",                          x = 0, y = 0, width = 40,
                                                         label = "AutoClip requires additional dependencies to be installed." },
             { class = "label",                          x = 0, y = 1, width = 40,
                                                         label = "Click „Run“ to execute the following commands. You may edit the command before running, or copy the command and execute it elsewhere." },
             { class = "textbox", name = "command",      x = 0, y = 2, width = 40, height = 12,
-                                                        text = "'" .. config["python"] .. "' -m ensurepip\n" .. 
-                                                               "'" .. config["python"] .. "' -m pip install numpy PySide6 scikit-image --upgrade --upgrade-strategy eager\n" .. 
-                                                               "'" .. config["python"] .. "' -m pip install ass-autoclip --upgrade\n" ..
-                                                              (config["vsrepo_mode"] == "vsrepo in PATH (`$ vsrepo --help`)"
-                                                           and "'" .. config["vsrepo"] .. "' update\n" ..
-                                                               "'" .. config["vsrepo"] .. "' install lsmas dfttest\n"
-                                                            or "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' update\n" ..
-                                                               "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' install lsmas dfttest\n") }
+                                                        text = exe_fmt("python") .. " -m ensurepip\n" ..
+                                                               exe_fmt("python") .. " -m pip install numpy PySide6 scikit-image --upgrade --upgrade-strategy eager\n" ..
+                                                               exe_fmt("python") .. " -m pip install ass-autoclip --upgrade\n" ..
+                                                               exe_fmt("vsrepo") .. " update\n" ..
+                                                               exe_fmt("vsrepo") .. " install lsmas dfttest\n" }
         }
         local buttons = { "&Run", "Cancel" }
         local button_ids = { ok = "&Run", yes = "&Run", save = "&Run", apply = "&Run", close = "Cancel", no = "Cancel", cancel = "Cancel" }
@@ -396,23 +456,19 @@ no_dependencies = function()
     local button_ids
     local button
     local result_table
-    while not os.execute(c("'" .. config["python"] .. "' -m ass_autoclip --check-dependencies")) do
+    while not os.execute(c(exe_fmt("python") .. " -m ass_autoclip --check-dependencies")) do
         dialog = {
             { class = "label",                          x = 0, y = 0, width = 40,
                                                         label = "Failed to execute AutoClip." },
             { class = "label",                          x = 0, y = 1, width = 40,
                                                         label = "Click „Run Command“ to execute the following commands and reinstall AutoClip. You may edit the command before running, or copy the command and execute it elsewhere." },
             { class = "textbox", name = "command",      x = 0, y = 2, width = 40, height = 12,
-                                                        text = "'" .. config["python"] .. "' -m ensurepip\n" .. 
-                                                               "'" .. config["python"] .. "' -m pip install numpy PySide6 scikit-image --upgrade --upgrade-strategy eager\n" .. 
-                                                               "'" .. config["python"] .. "' -m pip install ass-autoclip --force-reinstall\n" ..
-                                                              (config["vsrepo_mode"] == "vsrepo in PATH (`$ vsrepo --help`)"
-                                                           and "'" .. config["vsrepo"] .. "' update\n" ..
-                                                               "'" .. config["vsrepo"] .. "' install lsmas dfttest\n" ..
-                                                               "'" .. config["vsrepo"] .. "' upgrade lsmas dfttest\n"
-                                                            or "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' update\n" ..
-                                                               "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' install lsmas dfttest\n" ..
-                                                               "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' upgrade lsmas dfttest\n") }
+                                                        text = exe_fmt("python") .. " -m ensurepip\n" ..
+                                                               exe_fmt("python") .. " -m pip install numpy PySide6 scikit-image --upgrade --upgrade-strategy eager\n" ..
+                                                               exe_fmt("python") .. " -m pip install ass-autoclip --force-reinstall\n" ..
+                                                               exe_fmt("vsrepo") .. " update\n" ..
+                                                               exe_fmt("vsrepo") .. " install lsmas dfttest\n" ..
+                                                               exe_fmt("vsrepo") .. " upgrade lsmas dfttest\n" }
         }
         buttons = { "&Run Command", "Cancel" }
         button_ids = { ok = "&Run Command", yes = "&Run Command", save = "&Run Command", apply = "&Run Command", close = "Cancel", no = "Cancel", cancel = "Cancel" }
@@ -434,12 +490,9 @@ out_of_date_dependencies = function()
         { class = "label",                          x = 0, y = 1, width = 40,
                                                     label = "Click „Run Command“ to execute the following commands and update AutoClip. You may edit the command before running, or copy the command and execute it elsewhere." },
         { class = "textbox", name = "command",      x = 0, y = 2, width = 40, height = 12,
-                                                    text = "'" .. config["python"] .. "' -m pip install ass-autoclip --upgrade --upgrade-strategy eager\n" ..
-                                                          (config["vsrepo_mode"] == "vsrepo in PATH (`$ vsrepo --help`)"
-                                                       and "'" .. config["vsrepo"] .. "' update\n" ..
-                                                           "'" .. config["vsrepo"] .. "' upgrade lsmas dfttest\n"
-                                                        or "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' update\n" ..
-                                                           "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' upgrade lsmas dfttest\n") }
+                                                    text = exe_fmt("python") .. " -m pip install ass-autoclip --upgrade --upgrade-strategy eager\n" ..
+                                                           exe_fmt("vsrepo") .. " update\n" ..
+                                                           exe_fmt("vsrepo") .. " upgrade lsmas dfttest\n" }
     }
     local buttons = { "&Run Command", "Remind Me Next Time", "Do Not Show Again", "Cancel" }
     local button_ids = { ok = "&Run Command", yes = "&Run Command", save = "&Run Command", apply = "&Run Command", close = "Cancel", no = "Cancel", cancel = "Cancel" }
@@ -470,12 +523,9 @@ update_dependencies = function()
         { class = "label",                          x = 0, y = 1, width = 40,
                                                     label = "Click „Run“ to execute the following commands. You may edit the command before running, or copy the command and execute it elsewhere." },
         { class = "textbox", name = "command",      x = 0, y = 2, width = 40, height = 12,
-                                                    text = "'" .. config["python"] .. "' -m pip install ass-autoclip --upgrade --upgrade-strategy eager\n" ..
-                                                          (config["vsrepo_mode"] == "vsrepo in PATH (`$ vsrepo --help`)"
-                                                       and "'" .. config["vsrepo"] .. "' update\n" ..
-                                                           "'" .. config["vsrepo"] .. "' upgrade lsmas dfttest\n"
-                                                        or "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' update\n" ..
-                                                           "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' upgrade lsmas dfttest\n") }
+                                                    text = exe_fmt("python") .. " -m pip install ass-autoclip --upgrade --upgrade-strategy eager\n" ..
+                                                           exe_fmt("vsrepo") .. " update\n" ..
+                                                           exe_fmt("vsrepo") .. " upgrade lsmas dfttest\n" }
     }
     local buttons = { "&Run", "Close" }
     local button_ids = { ok = "&Run", yes = "&Run", save = "&Run", apply = "&Run", close = "Close", no = "Close", cancel = "Close" }
@@ -495,12 +545,9 @@ unsupported_dependencies = function()
         { class = "label",                          x = 0, y = 1, width = 40,
                                                     label = "Click „Run Command“ to execute the following commands and update AutoClip. You may edit the command before running, or copy the command and execute it elsewhere." },
         { class = "textbox", name = "command",      x = 0, y = 2, width = 40, height = 12,
-                                                    text = "'" .. config["python"] .. "' -m pip install ass-autoclip --upgrade --upgrade-strategy eager\n" ..
-                                                          (config["vsrepo_mode"] == "vsrepo in PATH (`$ vsrepo --help`)"
-                                                       and "'" .. config["vsrepo"] .. "' update\n" ..
-                                                           "'" .. config["vsrepo"] .. "' upgrade lsmas dfttest\n"
-                                                        or "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' update\n" ..
-                                                           "'" .. config["python"] .. "' '" .. config["vsrepo"] .. "' upgrade lsmas dfttest\n") }
+                                                    text = exe_fmt("python") .. " -m pip install ass-autoclip --upgrade --upgrade-strategy eager\n" ..
+                                                           exe_fmt("vsrepo") .. " update\n" ..
+                                                           exe_fmt("vsrepo") .. " upgrade lsmas dfttest\n" }
     }
     local buttons = { "&Run Command", "Cancel" }
     local button_ids = { ok = "&Run Command", yes = "&Run Command", save = "&Run Command", apply = "&Run Command", close = "Cancel", no = "Cancel", cancel = "Cancel" }
@@ -542,7 +589,7 @@ first_time_python_vsrepo_main = function()
 end end
 
 no_dependencies_main = function()
-    if os.execute(c("'" .. config["python"] .. "' -m ass_autoclip --check-dependencies")) then
+    if os.execute(c(exe_fmt("python") .. " -m ass_autoclip --check-dependencies")) then
         return ok("Already satisfied")
     else
         first_time_python()
@@ -690,7 +737,7 @@ autoclip_main = function(sub, sel, act)
     ::run_again::
     
     output_file = aegisub.decode_path("?temp/zah.autoclip" .. string.sub(tostring(math.random(10000000, 99999999)), 2) .. ".json")
-    command = "'" .. config["python"] .. "'" ..
+    command = exe_fmt("python") ..
                       " -m ass_autoclip --input '" .. video_file .. "'" ..
                                       " --output '" .. output_file .. "'" ..
                         string.format(" --clip '%f %f %f %f'", clip[1], clip[2], clip[3], clip[4]) ..
